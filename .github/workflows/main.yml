@@ -1,0 +1,2 @@
+# .github/workflows/bot.yml cron line:
+- cron: '*/5 * * * *'   # every 5 minutes
