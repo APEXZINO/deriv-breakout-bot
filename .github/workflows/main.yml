@@ -28,6 +28,4 @@ jobs:
           DERIV_APP_ID: ${{ secrets.DERIV_APP_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python src/bot_single_pass.py
-
-
+        run: python "Bot single pass.py"
