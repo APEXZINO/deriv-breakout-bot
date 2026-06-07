@@ -1,1 +1,29 @@
+name: Deriv Breakout Scanner
 
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # runs every 30 minutes (H4 breakouts don't need 5 min)
+  workflow_dispatch:
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas websockets
+
+      - name: Run Breakout Scanner
+        env:
+          TG_TOKEN:   ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python breakout_scanner.py
