@@ -84,7 +84,7 @@ def send_telegram(message: str):
         data = urllib.parse.urlencode({
             "chat_id":    CFG.tg_chat_id,
             "text":       message,
-            "parse_mode": "Markdown"
+            "parse_mode": "HTML"
         }).encode()
         urllib.request.urlopen(
             urllib.request.Request(url, data=data), timeout=10
@@ -97,28 +97,25 @@ def send_telegram(message: str):
 def breakout_alert(symbol, direction, broken_level,
                    entry, sl, tp1, tp2, risk,
                    h4_time, retest_time) -> str:
-    icon   = "🟢 *BULLISH BREAKOUT*" if direction == "BULL" else "🔴 *BEARISH BREAKOUT*"
+    icon = "🟢 <b>BULLISH BREAKOUT</b>" if direction == "BULL" else "🔴 <b>BEARISH BREAKOUT</b>"
     action = "BUY on retest" if direction == "BULL" else "SELL on retest"
     ht     = h4_time.astimezone(WAT).strftime("%m-%d %H:%M WAT")
     rt     = retest_time.astimezone(WAT).strftime("%m-%d %H:%M WAT")
     return (
         f"{icon}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Pair:*    {symbol}\n"
-        f"*Action:*  {action}\n"
+        f"<b>Pair:</b>    {symbol}\n"
+f"<b>Action:</b>  {action}\n"
+f"<b>Broken Level:</b> {broken_level}\n"
+f"<b>H4 Breakout:</b>  {ht}\n"
+f"<b>M30 Retest:</b>   {rt}\n"
+f"<b>Entry:</b>   {entry}\n"
+f"<b>SL:</b>      {sl}\n"
+f"<b>TP1:</b>     {tp1}  (50% close, move SL to BE)\n"
+f"<b>TP2:</b>     {tp2}  (let rest run)\n"
+f"<b>Risk/pt:</b> {risk}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Broken Level:* {broken_level}\n"
-        f"*H4 Breakout:*  {ht}\n"
-        f"*M30 Retest:*   {rt}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Entry:*   {entry}\n"
-        f"*SL:*      {sl}\n"
-        f"*TP1:*     {tp1}  _(50% close, move SL to BE)_\n"
-        f"*TP2:*     {tp2}  _(let rest run)_\n"
-        f"*Risk/pt:* {risk}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"_H4 breakout confirmed + M30 retest entry_"
-    )
+        f"<i>H4 breakout confirmed + M30 retest entry</i>"
 
 
 # =============================================================================
@@ -490,7 +487,7 @@ async def scan_all():
                 icon = "📈" if breakout["direction"] == "BULL" else "📉"
                 direction_text = "BULLISH" if breakout["direction"] == "BULL" else "BEARISH"
                 msg = (
-                    f"{icon} *{direction_text} BREAKOUT — {symbol}*\n"
+                    f"{icon} <b>{direction_text} BREAKOUT — {symbol}</b>\n"
                     f"*Level:* {breakout['broken_level']}\n"
                     f"*Time:*  {now}\n"
                     f"_Waiting for M30 retest..._"
