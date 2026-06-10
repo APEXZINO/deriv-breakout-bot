@@ -34,7 +34,7 @@ class Config:
     # Deriv pairs to scan
     symbols: list = field(default_factory=lambda: [
         "R_75",      # Volatility 75 Index
-        "R_75_1S",   # Volatility 75 (1s) Index
+        "1HZ75V",   # Volatility 75 (1s) Index
         "R_10",      # Volatility 10 Index
         "R_25",      # Volatility 25 Index
     ])
