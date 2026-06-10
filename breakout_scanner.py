@@ -2,14 +2,11 @@
 Deriv Breakout Scanner
 Pairs: V75, V75_1s, V10, V25
 Timeframes: H4 (breakout detection) + M30 (retest entry)
-Logic:
-  - Detect breakout of H4 swing high (bullish) or swing low (bearish)
-  - Confirm breakout with strong close and volume (body size)
-  - Wait for M30 retest of the broken level
-  - Fire Telegram alert with entry, SL and TP
+- No duplicate alerts for same breakout level within cooldown period
+- HTML formatted Telegram messages
 """
 
-import asyncio, json, logging, sys, urllib.request, urllib.parse, os
+import asyncio, json, logging, sys, urllib.request, urllib.parse, os, time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -31,33 +28,31 @@ WAT = timezone(timedelta(hours=1))
 # =============================================================================
 @dataclass
 class Config:
-    # Deriv pairs to scan
     symbols: list = field(default_factory=lambda: [
-        "R_75",      # Volatility 75 Index
-        "1HZ75V",   # Volatility 75 (1s) Index
-        "R_10",      # Volatility 10 Index
-        "R_25",      # Volatility 25 Index
+        "R_75",
+        "1HZ75V",
+        "R_10",
+        "R_25",
     ])
 
-    # Telegram
     tg_token:   str = ""
     tg_chat_id: str = ""
 
-    # Timeframes
-    h4_tf:    int = 14400   # H4 — breakout detection
-    m30_tf:   int = 1800    # M30 — retest entry
-    h4_count: int = 100     # H4 candles to analyse
-    m30_count:int = 80      # M30 candles to analyse
+    h4_tf:     int = 14400
+    m30_tf:    int = 1800
+    h4_count:  int = 100
+    m30_count: int = 80
 
-    # Breakout settings
-    swing_lookback:    int   = 10     # bars to define swing high/low
-    breakout_body_pct: float = 0.5    # breakout candle body must be >= 50% of range
-    retest_proximity:  float = 0.3    # M30 price within 0.3% of broken level = retest
-    min_breakout_pct:  float = 0.05   # minimum breakout size as % of price
+    swing_lookback:    int   = 10
+    breakout_body_pct: float = 0.5
+    retest_proximity:  float = 0.3
+    min_breakout_pct:  float = 0.05
 
-    # Trade settings
-    rr_ratio:   float = 2.0   # risk reward
-    atr_period: int   = 14    # ATR period for SL
+    rr_ratio:   float = 2.0
+    atr_period: int   = 14
+
+    # Cooldown — hours before same level can alert again
+    cooldown_hours: int = 8
 
     live_mode: bool = False
 
@@ -71,6 +66,53 @@ if os.environ.get("TG_TOKEN"):
     CFG.tg_token = os.environ["TG_TOKEN"]
 if os.environ.get("TG_CHAT_ID"):
     CFG.tg_chat_id = os.environ["TG_CHAT_ID"]
+
+
+# =============================================================================
+#  SIGNAL COOLDOWN — prevents duplicate alerts
+# =============================================================================
+# Stored as: { "SYMBOL_DIRECTION_LEVEL": timestamp_of_last_alert }
+# Uses a flat file in the repo to persist across GitHub Actions runs
+COOLDOWN_FILE = "signal_cooldown.json"
+
+def load_cooldown() -> dict:
+    try:
+        if os.path.exists(COOLDOWN_FILE):
+            with open(COOLDOWN_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_cooldown(data: dict):
+    try:
+        with open(COOLDOWN_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.error("Could not save cooldown file: %s", e)
+
+def is_duplicate(symbol: str, direction: str, level: float) -> bool:
+    """Returns True if this signal was already sent within cooldown_hours."""
+    key = f"{symbol}_{direction}_{round(level, 2)}"
+    cooldown = load_cooldown()
+    if key in cooldown:
+        last_sent = cooldown[key]
+        hours_elapsed = (time.time() - last_sent) / 3600
+        if hours_elapsed < CFG.cooldown_hours:
+            log.info("Duplicate suppressed: %s (%.1f hrs ago)", key, hours_elapsed)
+            return True
+    return False
+
+def mark_sent(symbol: str, direction: str, level: float):
+    """Record that this signal was just sent."""
+    key = f"{symbol}_{direction}_{round(level, 2)}"
+    cooldown = load_cooldown()
+    # Clean old entries (older than 24 hours)
+    now = time.time()
+    cooldown = {k: v for k, v in cooldown.items() if now - v < 86400}
+    cooldown[key] = now
+    save_cooldown(cooldown)
+    log.info("Signal recorded: %s", key)
 
 
 # =============================================================================
@@ -90,40 +132,51 @@ def send_telegram(message: str):
         urllib.request.urlopen(
             urllib.request.Request(url, data=data), timeout=10
         )
-        log.info("Telegram sent for %s", message[:30])
+        log.info("Telegram sent.")
     except Exception as e:
         log.error("Telegram error: %s", e)
 
 
-def breakout_alert(symbol, direction, broken_level,
-                   entry, sl, tp1, tp2, risk,
-                   h4_time, retest_time) -> str:
+def build_alert(symbol, direction, broken_level,
+                entry, sl, tp1, tp2, risk,
+                h4_time, retest_time) -> str:
     icon   = "🟢 <b>BULLISH BREAKOUT</b>" if direction == "BULL" else "🔴 <b>BEARISH BREAKOUT</b>"
     action = "BUY on retest" if direction == "BULL" else "SELL on retest"
     ht     = h4_time.astimezone(WAT).strftime("%m-%d %H:%M WAT")
     rt     = retest_time.astimezone(WAT).strftime("%m-%d %H:%M WAT")
     return (
         f"{icon}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Pair:*    {symbol}\n"
-        f"*Action:*  {action}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Broken Level:* {broken_level}\n"
-        f"*H4 Breakout:*  {ht}\n"
-        f"*M30 Retest:*   {rt}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Entry:*   {entry}\n"
-        f"*SL:*      {sl}\n"
-        f"*TP1:*     {tp1}  _(50% close, move SL to BE)_\n"
-        f"*TP2:*     {tp2}  _(let rest run)_\n"
-        f"*Risk/pt:* {risk}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"_H4 breakout confirmed + M30 retest entry_"
+        f"————————————————————\n"
+        f"<b>Pair:</b>    {symbol}\n"
+        f"<b>Action:</b>  {action}\n"
+        f"————————————————————\n"
+        f"<b>Broken Level:</b> {broken_level}\n"
+        f"<b>H4 Breakout:</b>  {ht}\n"
+        f"<b>M30 Retest:</b>   {rt}\n"
+        f"————————————————————\n"
+        f"<b>Entry:</b>   {entry}\n"
+        f"<b>SL:</b>      {sl}\n"
+        f"<b>TP1:</b>     {tp1}  <i>(50% close, move SL to BE)</i>\n"
+        f"<b>TP2:</b>     {tp2}  <i>(let rest run)</i>\n"
+        f"<b>Risk/pt:</b> {risk}\n"
+        f"————————————————————\n"
+        f"<i>H4 breakout confirmed + M30 retest entry</i>"
+    )
+
+
+def build_headsup(symbol, direction, broken_level, now) -> str:
+    icon           = "📈" if direction == "BULL" else "📉"
+    direction_text = "BULLISH" if direction == "BULL" else "BEARISH"
+    return (
+        f"{icon} <b>{direction_text} BREAKOUT — {symbol}</b>\n"
+        f"<b>Level:</b> {broken_level}\n"
+        f"<b>Time:</b>  {now}\n"
+        f"<i>Watching for M30 retest entry...</i>"
     )
 
 
 # =============================================================================
-#  WEBSOCKET — fetch candles (no auth needed)
+#  WEBSOCKET
 # =============================================================================
 async def fetch_candles(ws, symbol, granularity, count) -> Optional[pd.DataFrame]:
     await ws.send(json.dumps({
@@ -151,7 +204,6 @@ async def fetch_candles(ws, symbol, granularity, count) -> Optional[pd.DataFrame
 
 
 async def fetch_symbol_data(symbol):
-    """Fetch H4 and M30 data for a single symbol."""
     try:
         async with websockets.connect(CFG.uri, ping_timeout=15) as ws:
             h4  = await fetch_candles(ws, symbol, CFG.h4_tf,  CFG.h4_count)
@@ -179,48 +231,21 @@ def body_ratio(df):
     return (df["Close"] - df["Open"]).abs() / rng
 
 
-def swing_high(df, n):
-    """Highest high over n bars on each side."""
-    return df["High"].rolling(n * 2 + 1, center=True).max()
-
-
-def swing_low(df, n):
-    """Lowest low over n bars on each side."""
-    return df["Low"].rolling(n * 2 + 1, center=True).min()
-
-
 # =============================================================================
 #  BREAKOUT DETECTION — H4
 # =============================================================================
 def detect_h4_breakout(h4: pd.DataFrame) -> dict:
-    """
-    Breakout logic:
-    ─────────────────
-    BULLISH breakout:
-      Current H4 candle closes ABOVE the swing high of the last N bars.
-      Candle body must be strong (>= breakout_body_pct).
-      Breakout size must exceed minimum % threshold.
-      This signals end of a downtrend / start of uptrend.
-
-    BEARISH breakout:
-      Current H4 candle closes BELOW the swing low of the last N bars.
-      Same body and size filters applied.
-      Signals end of uptrend / start of downtrend.
-
-    Returns the breakout direction and the broken level.
-    """
     df = h4.copy()
     df["BR"]  = body_ratio(df)
     df["ATR"] = atr(df, CFG.atr_period)
 
     n = CFG.swing_lookback
-
-    # Rolling swing high/low EXCLUDING current bar (shift by 1)
     df["SwingHigh"] = df["High"].shift(1).rolling(n).max()
     df["SwingLow"]  = df["Low"].shift(1).rolling(n).min()
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    min_size = last["Close"] * (CFG.min_breakout_pct / 100)
 
     result = {
         "direction":    None,
@@ -229,23 +254,18 @@ def detect_h4_breakout(h4: pd.DataFrame) -> dict:
         "atr":          float(last["ATR"]),
     }
 
-    # Minimum breakout size
-    min_size = last["Close"] * (CFG.min_breakout_pct / 100)
-
-    # Bullish breakout: close above swing high with strong body
     if (last["Close"] > last["SwingHigh"] and
         last["BR"] >= CFG.breakout_body_pct and
         (last["Close"] - last["SwingHigh"]) >= min_size and
-        prev["Close"] <= prev["SwingHigh"]):   # previous bar was NOT broken yet
+        prev["Close"] <= prev["SwingHigh"]):
         result["direction"]    = "BULL"
         result["broken_level"] = round(float(last["SwingHigh"]), 4)
         result["breakout_bar"] = last.name
 
-    # Bearish breakout: close below swing low with strong body
     elif (last["Close"] < last["SwingLow"] and
           last["BR"] >= CFG.breakout_body_pct and
           (last["SwingLow"] - last["Close"]) >= min_size and
-          prev["Close"] >= prev["SwingLow"]):  # previous bar was NOT broken yet
+          prev["Close"] >= prev["SwingLow"]):
         result["direction"]    = "BEAR"
         result["broken_level"] = round(float(last["SwingLow"]), 4)
         result["breakout_bar"] = last.name
@@ -257,87 +277,61 @@ def detect_h4_breakout(h4: pd.DataFrame) -> dict:
 #  RETEST DETECTION — M30
 # =============================================================================
 def detect_m30_retest(m30: pd.DataFrame, breakout: dict) -> dict:
-    """
-    After H4 breakout, watch M30 for a retest of the broken level.
-
-    Bullish retest:
-      Price pulls back DOWN to the broken swing high (now support)
-      and closes back above it — entry signal.
-
-    Bearish retest:
-      Price pulls back UP to the broken swing low (now resistance)
-      and closes back below it — entry signal.
-
-    Proximity tolerance: ob_proximity_pct % around the broken level.
-    """
     if not breakout["direction"]:
         return {"retest": False}
 
-    df       = m30.copy()
-    level    = breakout["broken_level"]
-    tol      = level * (CFG.retest_proximity / 100)
-    direction= breakout["direction"]
+    df        = m30.copy()
+    level     = breakout["broken_level"]
+    tol       = level * (CFG.retest_proximity / 100)
+    direction = breakout["direction"]
 
-    # Only look at M30 bars AFTER the H4 breakout
     if breakout["breakout_bar"] is not None:
         df = df[df.index >= breakout["breakout_bar"]]
 
     if df.empty:
         return {"retest": False}
 
-    result = {"retest": False}
-
     if direction == "BULL":
-        # Retest: candle low touches the level and closes above it
         retest_bars = df[
             (df["Low"] <= level + tol) &
             (df["Close"] > level)
         ]
         if not retest_bars.empty:
             rb = retest_bars.iloc[-1]
-            result = {
-                "retest":       True,
-                "retest_bar":   rb.name,
-                "entry":        round(float(rb["Close"]), 4),
-                "retest_low":   round(float(rb["Low"]), 4),
+            return {
+                "retest":     True,
+                "retest_bar": rb.name,
+                "entry":      round(float(rb["Close"]), 4),
+                "retest_low": round(float(rb["Low"]), 4),
             }
 
     elif direction == "BEAR":
-        # Retest: candle high touches the level and closes below it
         retest_bars = df[
             (df["High"] >= level - tol) &
             (df["Close"] < level)
         ]
         if not retest_bars.empty:
             rb = retest_bars.iloc[-1]
-            result = {
-                "retest":       True,
-                "retest_bar":   rb.name,
-                "entry":        round(float(rb["Close"]), 4),
-                "retest_high":  round(float(rb["High"]), 4),
+            return {
+                "retest":      True,
+                "retest_bar":  rb.name,
+                "entry":       round(float(rb["Close"]), 4),
+                "retest_high": round(float(rb["High"]), 4),
             }
 
-    return result
+    return {"retest": False}
 
 
 # =============================================================================
 #  TRADE PLAN
 # =============================================================================
 def build_trade(breakout: dict, retest: dict) -> dict:
-    """
-    Entry  = M30 retest close
-    SL     = Below retest candle low (BULL) / Above retest candle high (BEAR)
-             + 0.5x H4 ATR buffer
-    TP1    = Entry + risk x 1.0  (50% close, move SL to BE)
-    TP2    = Entry + risk x RR   (let rest run)
-    """
     if not retest.get("retest"):
         return {}
 
     direction = breakout["direction"]
     entry     = retest["entry"]
-    h4_atr    = breakout["atr"]
-    buf       = h4_atr * 0.5
+    buf       = breakout["atr"] * 0.5
 
     if direction == "BULL":
         sl   = round(retest["retest_low"] - buf, 4)
@@ -350,108 +344,11 @@ def build_trade(breakout: dict, retest: dict) -> dict:
         tp1  = round(entry - risk * 1.0, 4)
         tp2  = round(entry - risk * CFG.rr_ratio, 4)
 
-    return {
-        "entry": entry,
-        "sl":    sl,
-        "tp1":   tp1,
-        "tp2":   tp2,
-        "risk":  risk,
-    }
+    return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "risk": risk}
 
 
 # =============================================================================
-#  SCAN ONE SYMBOL
-# =============================================================================
-async def scan_symbol(symbol: str):
-    log.info("Scanning %s...", symbol)
-    h4, m30 = await fetch_symbol_data(symbol)
-
-    if h4 is None or m30 is None:
-        log.error("%s — data fetch failed.", symbol)
-        return
-
-    # Step 1: detect H4 breakout
-    breakout = detect_h4_breakout(h4)
-
-    if not breakout["direction"]:
-        log.info("%s — No H4 breakout detected.", symbol)
-        return
-
-    log.info("%s — %s breakout at level %s",
-             symbol, breakout["direction"], breakout["broken_level"])
-
-    # Step 2: detect M30 retest
-    retest = detect_m30_retest(m30, breakout)
-
-    if not retest.get("retest"):
-        log.info("%s — Breakout found but no M30 retest yet. Level: %s",
-                 symbol, breakout["broken_level"])
-
-        # Send a heads-up alert — breakout confirmed, watching for retest
-        now = datetime.now(WAT).strftime("%H:%M WAT")
-        icon = "📈" if breakout["direction"] == "BULL" else "📉"
-        direction_text = "BULLISH" if breakout["direction"] == "BULL" else "BEARISH"
-        msg = (
-            f"{icon} *{direction_text} BREAKOUT DETECTED*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"*Pair:*   {symbol}\n"
-            f"<b>Level:</b>  {breakout['broken_level']}\n"
-            f"<b>Time:</b>   {now}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"_Watching for M30 retest entry..._\n"
-            f"<i>Next alert fires when price retests the level.</i>"
-        )
-        send_telegram(msg)
-        return
-
-    # Step 3: build trade plan
-    trade = build_trade(breakout, retest)
-    if not trade:
-        return
-
-    # Step 4: send full signal alert
-    h4_time     = breakout["breakout_bar"]
-    retest_time = retest["retest_bar"]
-
-    msg = breakout_alert(
-        symbol      = symbol,
-        direction   = breakout["direction"],
-        broken_level= breakout["broken_level"],
-        entry       = trade["entry"],
-        sl          = trade["sl"],
-        tp1         = trade["tp1"],
-        tp2         = trade["tp2"],
-        risk        = trade["risk"],
-        h4_time     = h4_time,
-        retest_time = retest_time,
-    )
-    send_telegram(msg)
-    log.info("%s — Signal sent! Entry: %s SL: %s TP2: %s",
-             symbol, trade["entry"], trade["sl"], trade["tp2"])
-
-
-# =============================================================================
-#  REPORT — console output
-# =============================================================================
-def print_summary(symbol, breakout, retest, trade):
-    now = datetime.now(WAT).strftime("%H:%M:%S WAT")
-    print(f"\n{'='*60}", flush=True)
-    print(f"  {symbol}  |  {now}", flush=True)
-    if not breakout["direction"]:
-        print(f"  H4: No breakout detected", flush=True)
-    else:
-        print(f"  H4 Breakout: {breakout['direction']} at {breakout['broken_level']}", flush=True)
-        if retest.get("retest"):
-            print(f"  M30 Retest:  CONFIRMED", flush=True)
-            print(f"  Entry: {trade.get('entry')}  SL: {trade.get('sl')}", flush=True)
-            print(f"  TP1:   {trade.get('tp1')}  TP2: {trade.get('tp2')}", flush=True)
-        else:
-            print(f"  M30 Retest:  Watching... level {breakout['broken_level']}", flush=True)
-    print(f"{'='*60}", flush=True)
-
-
-# =============================================================================
-#  MAIN SCAN LOOP
+#  SCAN ALL SYMBOLS
 # =============================================================================
 async def scan_all():
     now = datetime.now(WAT).strftime("%H:%M:%S WAT")
@@ -465,40 +362,56 @@ async def scan_all():
                 continue
 
             breakout = detect_h4_breakout(h4)
-            retest   = detect_m30_retest(m30, breakout) if breakout["direction"] else {"retest": False}
-            trade    = build_trade(breakout, retest) if retest.get("retest") else {}
 
-            print_summary(symbol, breakout, retest, trade)
+            if not breakout["direction"]:
+                print(f"\n  {symbol} | {now}", flush=True)
+                print(f"  H4: No breakout detected", flush=True)
+                await asyncio.sleep(2)
+                continue
 
-            # Send Telegram if retest confirmed
+            direction = breakout["direction"]
+            level     = breakout["broken_level"]
+
+            print(f"\n  {symbol} | {now}", flush=True)
+            print(f"  H4 Breakout: {direction} at {level}", flush=True)
+
+            retest = detect_m30_retest(m30, breakout)
+            trade  = build_trade(breakout, retest) if retest.get("retest") else {}
+
             if retest.get("retest") and trade:
-                msg = breakout_alert(
-                    symbol       = symbol,
-                    direction    = breakout["direction"],
-                    broken_level = breakout["broken_level"],
-                    entry        = trade["entry"],
-                    sl           = trade["sl"],
-                    tp1          = trade["tp1"],
-                    tp2          = trade["tp2"],
-                    risk         = trade["risk"],
-                    h4_time      = breakout["breakout_bar"],
-                    retest_time  = retest["retest_bar"],
-                )
-                send_telegram(msg)
+                print(f"  M30 Retest: CONFIRMED", flush=True)
+                print(f"  Entry: {trade['entry']}  SL: {trade['sl']}", flush=True)
+                print(f"  TP1: {trade['tp1']}  TP2: {trade['tp2']}", flush=True)
 
-            # Send heads-up if breakout only (no retest yet)
-            elif breakout["direction"] and not retest.get("retest"):
-                icon = "📈" if breakout["direction"] == "BULL" else "📉"
-                direction_text = "BULLISH" if breakout["direction"] == "BULL" else "BEARISH"
-                msg = (
-                    f"{icon} <b>{direction_text} BREAKOUT — {symbol}</b>\n"
-                    f"*Level:* {breakout['broken_level']}\n"
-                    f"*Time:*  {now}\n"
-                    f"_Waiting for M30 retest..._"
-                )
-                send_telegram(msg)
+                # Check cooldown before sending
+                if is_duplicate(symbol, direction, level):
+                    print(f"  Telegram: SKIPPED (duplicate — same level sent recently)", flush=True)
+                else:
+                    msg = build_alert(
+                        symbol       = symbol,
+                        direction    = direction,
+                        broken_level = level,
+                        entry        = trade["entry"],
+                        sl           = trade["sl"],
+                        tp1          = trade["tp1"],
+                        tp2          = trade["tp2"],
+                        risk         = trade["risk"],
+                        h4_time      = breakout["breakout_bar"],
+                        retest_time  = retest["retest_bar"],
+                    )
+                    send_telegram(msg)
+                    mark_sent(symbol, direction, level)
 
-            # Small delay between symbols to avoid rate limiting
+            else:
+                print(f"  M30 Retest: Watching... level {level}", flush=True)
+
+                # Heads-up alert also has cooldown
+                if not is_duplicate(symbol, direction + "_HEADSUP", level):
+                    send_telegram(build_headsup(symbol, direction, level, now))
+                    mark_sent(symbol, direction + "_HEADSUP", level)
+                else:
+                    print(f"  Heads-up: SKIPPED (already sent recently)", flush=True)
+
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -508,13 +421,13 @@ async def scan_all():
 
 async def main():
     print("Deriv Breakout Scanner | V75, V75 1s, V10, V25", flush=True)
-    print("H4 Breakout + M30 Retest Entry", flush=True)
+    print("H4 Breakout + M30 Retest | Cooldown: 8 hours per level", flush=True)
 
     if CFG.live_mode:
         try:
             while True:
                 await scan_all()
-                await asyncio.sleep(1800)  # re-scan every 30 min
+                await asyncio.sleep(1800)
         except KeyboardInterrupt:
             print("Stopped.")
             sys.exit(0)
@@ -523,4 +436,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-  
+                  
