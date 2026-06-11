@@ -2,7 +2,7 @@ name: Deriv Breakout Scanner
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # runs every 30 minutes (H4 breakouts don't need 5 min)
+    - cron: '* * * * *'   # runs every  minutes (H4 breakouts don't need 5 min)
   workflow_dispatch:
 
 jobs:
