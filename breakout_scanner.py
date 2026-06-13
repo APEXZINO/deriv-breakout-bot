@@ -139,27 +139,34 @@ def send_telegram(message: str):
 
 def build_alert(symbol, direction, broken_level,
                 entry, sl, tp1, tp2, risk,
-                h4_time, retest_time) -> str:
+                h4_time, retest_time, score, rating) -> str:
     icon   = "🟢 <b>BULLISH BREAKOUT</b>" if direction == "BULL" else "🔴 <b>BEARISH BREAKOUT</b>"
     action = "BUY on retest" if direction == "BULL" else "SELL on retest"
     ht     = h4_time.astimezone(WAT).strftime("%m-%d %H:%M WAT")
     rt     = retest_time.astimezone(WAT).strftime("%m-%d %H:%M WAT")
+    stars  = (
+        "🔥 PRIME"   if rating == "PRIME"  else
+        "⭐⭐ STRONG" if rating == "STRONG" else
+        "⭐  GOOD"   if rating == "GOOD"   else
+        "✗   SKIP"
+    )
     return (
         f"{icon}\n"
-        f"————————————————————\n"
+        f"\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
         f"<b>Pair:</b>    {symbol}\n"
         f"<b>Action:</b>  {action}\n"
-        f"————————————————————\n"
+        f"<b>Rating:</b>  {stars}  ({score}/5)\n"
+        f"\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
         f"<b>Broken Level:</b> {broken_level}\n"
         f"<b>H4 Breakout:</b>  {ht}\n"
         f"<b>M30 Retest:</b>   {rt}\n"
-        f"————————————————————\n"
+        f"\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
         f"<b>Entry:</b>   {entry}\n"
         f"<b>SL:</b>      {sl}\n"
         f"<b>TP1:</b>     {tp1}  <i>(50% close, move SL to BE)</i>\n"
         f"<b>TP2:</b>     {tp2}  <i>(let rest run)</i>\n"
         f"<b>Risk/pt:</b> {risk}\n"
-        f"————————————————————\n"
+        f"\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
         f"<i>H4 breakout confirmed + M30 retest entry</i>"
     )
 
@@ -247,11 +254,19 @@ def detect_h4_breakout(h4: pd.DataFrame) -> dict:
     prev = df.iloc[-2]
     min_size = last["Close"] * (CFG.min_breakout_pct / 100)
 
+    # EMA trend for scoring
+    df["E21"] = df["Close"].ewm(span=21, adjust=False).mean()
+    df["E50"] = df["Close"].ewm(span=50, adjust=False).mean()
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
     result = {
         "direction":    None,
         "broken_level": None,
         "breakout_bar": None,
         "atr":          float(last["ATR"]),
+        "score":        0,
+        "rating":       "SKIP",
     }
 
     if (last["Close"] > last["SwingHigh"] and
@@ -262,6 +277,13 @@ def detect_h4_breakout(h4: pd.DataFrame) -> dict:
         result["broken_level"] = round(float(last["SwingHigh"]), 4)
         result["breakout_bar"] = last.name
 
+        score = 1
+        if last["BR"] >= 0.6:                                        score += 1
+        if last["Close"] > last["E21"]:                              score += 1
+        if last["E21"]  > last["E50"]:                               score += 1
+        if (last["Close"] - last["SwingHigh"]) >= min_size * 2:      score += 1
+        result["score"] = score
+
     elif (last["Close"] < last["SwingLow"] and
           last["BR"] >= CFG.breakout_body_pct and
           (last["SwingLow"] - last["Close"]) >= min_size and
@@ -270,6 +292,20 @@ def detect_h4_breakout(h4: pd.DataFrame) -> dict:
         result["broken_level"] = round(float(last["SwingLow"]), 4)
         result["breakout_bar"] = last.name
 
+        score = 1
+        if last["BR"] >= 0.6:                                        score += 1
+        if last["Close"] < last["E21"]:                              score += 1
+        if last["E21"]  < last["E50"]:                               score += 1
+        if (last["SwingLow"] - last["Close"]) >= min_size * 2:       score += 1
+        result["score"] = score
+
+    s = result["score"]
+    result["rating"] = (
+        "PRIME"  if s >= 5 else
+        "STRONG" if s >= 4 else
+        "GOOD"   if s >= 3 else
+        "SKIP"
+    )
     return result
 
 
@@ -373,7 +409,7 @@ async def scan_all():
             level     = breakout["broken_level"]
 
             print(f"\n  {symbol} | {now}", flush=True)
-            print(f"  H4 Breakout: {direction} at {level}", flush=True)
+            print(f"  H4 Breakout: {direction} at {level}  |  {breakout["rating"]} ({breakout["score"]}/5)", flush=True)
 
             retest = detect_m30_retest(m30, breakout)
             trade  = build_trade(breakout, retest) if retest.get("retest") else {}
@@ -398,6 +434,8 @@ async def scan_all():
                         risk         = trade["risk"],
                         h4_time      = breakout["breakout_bar"],
                         retest_time  = retest["retest_bar"],
+                        score        = breakout["score"],
+                        rating       = breakout["rating"],
                     )
                     send_telegram(msg)
                     mark_sent(symbol, direction, level)
@@ -436,4 +474,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-                  
+                    
