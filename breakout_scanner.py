@@ -409,7 +409,9 @@ async def scan_all():
             level     = breakout["broken_level"]
 
             print(f"\n  {symbol} | {now}", flush=True)
-            print(f"  H4 Breakout: {direction} at {level}  |  {breakout["rating"]} ({breakout["score"]}/5)", flush=True)
+            rating = breakout["rating"]
+            score  = breakout["score"]
+            print(f"  H4 Breakout: {direction} at {level}  |  {rating} ({score}/5)", flush=True)
 
             retest = detect_m30_retest(m30, breakout)
             trade  = build_trade(breakout, retest) if retest.get("retest") else {}
@@ -474,4 +476,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-                    
+    
