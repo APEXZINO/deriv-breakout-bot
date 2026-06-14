@@ -54,9 +54,11 @@ class Config:
 
     # Quality filters
     adx_period:        int   = 14
+    atr_period:        int   = 14     # <-- ADD THIS LINE (Defaulting to 14)
     adx_min:           float = 18.0
     min_wick_ratio:    float = 0.25   # retest rejection wick
     max_retest_age:    int   = 6      # max H1 bars after breakout
+  
 
     # Trade settings
     rr_min:  float = 1.5
